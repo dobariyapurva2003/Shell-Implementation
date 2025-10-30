@@ -346,27 +346,13 @@ int main()
 
 
         //If we need I/O REDIRECTION PLUS PIPE
-        if(input.find("|")!=string::npos && 
-        (input.find(">")!=string::npos || input.find("<")!=string::npos || input.find(">>")!=string::npos))
-        {
-            Pipe_class obj;
-            obj.pipe2(input);
+        // ✅ Unified handling for pipes (with or without I/O redirection)
+        if (input.find('|') != string::npos) {
+            Pipe_class pipeObj;
+            pipeObj.executePipeline(input);
             continue;
         }
-        //Only for pipe
-        else if(input.find("|")!=string::npos)
-        {
-            Pipe_class obj1;
-            vector<string> res = obj1.pipe(input,'|');
 
-            //For verify
-            // for(int i=0;i<res.size();i++)
-            // {
-            //     obj1.pipe_ex(res[i]);
-            // }
-
-            continue;
-        }
 
         char* argv[tokens.size()+1];
         for(int i=0;i<tokens.size();i++)
