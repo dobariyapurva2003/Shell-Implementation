@@ -14,6 +14,5 @@
 class Pipe_class {
 public:
      // Method declaration
-    std::vector<std::string> pipe(std::string& str, char delimiter);
-    void pipe2(std::string& res);
+    void executePipeline(const std::string &input);
 };
