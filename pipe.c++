@@ -1,260 +1,123 @@
 #include "pipe.h"
 #include <iostream>
-#include<bits/stdc++.h>
+#include <sstream>
+#include <vector>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <sys/types.h>
-#include <cerrno>
 #include <cstring>
 
+class Pipe_class {
+public:
+    int executePipeline(const std::string &input);
+};
 
-//Fot IO redirection plus pipe, this will get arguments for IO redirection
-void parseCommand(const std::string& command, std::vector<std::string>& args, std::string& inputFile, std::string& outputFile) {
-    std::string trimmedCommand = command;
-    // Remove spaces around '<' and '>'
-    trimmedCommand.erase(trimmedCommand.find_last_not_of(" \t") + 1);
-    trimmedCommand.erase(0, trimmedCommand.find_first_not_of(" \t"));
-
-    size_t inputPos = trimmedCommand.find('<');
-    if (inputPos != std::string::npos) {
-        inputFile = trimmedCommand.substr(inputPos + 2);
-        //std::cout<<inputFile<<std::endl;
-        trimmedCommand = trimmedCommand.substr(0, inputPos);
+std::vector<std::string> split(const std::string &s, char delimiter) {
+    std::vector<std::string> tokens;
+    std::string token;
+    std::istringstream ss(s);
+    while (std::getline(ss, token, delimiter)) {
+        // trim
+        size_t start = token.find_first_not_of(" \t");
+        size_t end = token.find_last_not_of(" \t");
+        if (start != std::string::npos)
+            tokens.push_back(token.substr(start, end - start + 1));
     }
-
-    size_t outputPos = trimmedCommand.find('>');
-    if (outputPos != std::string::npos) {
-        outputFile = trimmedCommand.substr(outputPos + 2);
-        //std::cout<<outputFile<<std::endl;
-        trimmedCommand = trimmedCommand.substr(0, outputPos);
-    }
-
-    std::istringstream iss(trimmedCommand);
-    std::string arg;
-    while (iss >> arg) {
-        args.push_back(arg);
-    }
+    return tokens;
 }
 
-
-
-
-//For only IO redrection this will trim spaces
-std::string trim(const std::string& str) {
-    auto start = str.find_first_not_of(" \t");
-    auto end = str.find_last_not_of(" \t");
-    
-    if (start == std::string::npos || end == std::string::npos) {
-        return "";
-    }
-    
-    return str.substr(start, end - start + 1);
-}
-
-
-//For IO redirection only 
-std::vector<std::string> Pipe_class::pipe(std::string& str, char delimiter) {
-    std::vector<std::string> result;
-    std::stringstream ss(str);
-    std::string item;
-
-    while (std::getline(ss, item, delimiter)) {
-        result.push_back(trim(item)); // Trim and add to the result vector
-    }
-
-
-
-    int numCommands = result.size();
+int Pipe_class::executePipeline(const std::string &input) {
+    std::vector<std::string> commands = split(input, '|');
+    int numCommands = commands.size();
     int pipefds[2 * (numCommands - 1)];
 
     // Create pipes
-    for (int i = 0; i < numCommands - 1; ++i) {
-        if (::pipe(pipefds+i*2) == -1) {
+    for (int i = 0; i < numCommands - 1; i++) {
+        if (pipe(pipefds + i * 2) < 0) {
             perror("pipe");
             exit(1);
         }
     }
 
-    for (int i = 0; i < numCommands; ++i) {
-        if (fork() == 0) {
+    for (int i = 0; i < numCommands; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
             // Child process
 
-            // Set up the input pipe for the first command
+            // --- Handle input redirection for first command ---
+            if (i == 0 && commands[i].find('<') != std::string::npos) {
+                size_t pos = commands[i].find('<');
+                std::string file = commands[i].substr(pos + 1);
+                file.erase(0, file.find_first_not_of(" \t"));
+                commands[i] = commands[i].substr(0, pos);
+                int fd = open(file.c_str(), O_RDONLY);
+                if (fd < 0) { perror("open input"); exit(1); }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+
+            // --- Handle output redirection for last command ---
+            if (i == numCommands - 1 && 
+               (commands[i].find('>') != std::string::npos)) {
+
+                bool append = (commands[i].find(">>") != std::string::npos);
+                size_t pos = commands[i].find('>');
+                std::string file = commands[i].substr(pos + (append ? 2 : 1));
+                file.erase(0, file.find_first_not_of(" \t"));
+                commands[i] = commands[i].substr(0, pos);
+
+                int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+                int fd = open(file.c_str(), flags, 0644);
+                if (fd < 0) { perror("open output"); exit(1); }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+
+            // --- Set up input pipe (not first command) ---
             if (i != 0) {
                 if (dup2(pipefds[(i - 1) * 2], STDIN_FILENO) == -1) {
-                    perror("dup2");
+                    perror("dup2 input pipe");
                     exit(1);
                 }
             }
 
-            // Set up the output pipe for all but the last command
+            // --- Set up output pipe (not last command) ---
             if (i != numCommands - 1) {
                 if (dup2(pipefds[i * 2 + 1], STDOUT_FILENO) == -1) {
-                    perror("dup2");
+                    perror("dup2 output pipe");
                     exit(1);
                 }
             }
 
-            // Close all pipe file descriptors
-            for (int j = 0; j < 2 * (numCommands - 1); ++j) {
+            // Close all pipe ends
+            for (int j = 0; j < 2 * (numCommands - 1); j++) {
                 close(pipefds[j]);
             }
 
-            // Tokenize the command string
-            std::vector<char*> args;
-            std::string command = result[i];
-            std::stringstream ss(command);
+            // Tokenize command
+            std::istringstream iss(commands[i]);
+            std::vector<std::string> args;
             std::string arg;
-            while (ss >> arg) {
-                args.push_back(strdup(arg.c_str()));
-            }
-            args.push_back(nullptr); // Null-terminate the argument list
+            while (iss >> arg) args.push_back(arg);
+            std::vector<char*> argv;
+            for (auto &a : args) argv.push_back(&a[0]);
+            argv.push_back(nullptr);
 
-            // Execute the command
-            execvp(args[0], args.data());
-
-            // If execvp fails
+            execvp(argv[0], argv.data());
             perror("execvp");
             exit(1);
         }
     }
 
-    // Parent process closes all pipe file descriptors
-    for (int i = 0; i < 2 * (numCommands - 1); ++i) {
+    // Parent closes all pipe ends
+    for (int i = 0; i < 2 * (numCommands - 1); i++) {
         close(pipefds[i]);
     }
 
-    // Wait for all child processes to finish
-    for (int i = 0; i < numCommands; ++i) {
+    // Wait for all children
+    for (int i = 0; i < numCommands; i++) {
         wait(nullptr);
     }
 
-    return result;
-}
-
-
-//For IO redirection plus pipe
-void Pipe_class::pipe2(std::string& res) {
-    std::vector<std::string> semi;
-    std::string cmd;
-    std::istringstream iss(res);
-    
-
-
-    //To get cmds for every ";"
-    while (std::getline(iss, cmd, ';')) {
-        semi.push_back(cmd);
-    }
-
-    for(int i=0;i<semi.size();i++)
-    {
-        std::istringstream iss(semi[i]);
-        std::string command;
-        std::vector<std::string> commands;
-
-        //To get cmds for every pipeline
-        while (std::getline(iss, command, '|')) {
-            commands.push_back(command);
-        }
-
-        // Trim leading and trailing whitespace from each command
-        for (auto& cmd : commands) {
-            cmd.erase(0, cmd.find_first_not_of(" \t"));
-            cmd.erase(cmd.find_last_not_of(" \t") + 1);
-        }
-        int numCommands = commands.size();
-        int pipefds[2 * (numCommands - 1)];
-
-        // Create pipes
-        for (int i = 0; i < numCommands - 1; ++i) {
-            if (::pipe(pipefds + i * 2) == -1) {
-                perror("pipe");
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        for (int i = 0; i < numCommands; ++i) {
-            std::vector<std::string> args;
-            std::string inputFile, outputFile;
-
-            // Parse command to handle redirections
-            parseCommand(commands[i], args, inputFile, outputFile);
-
-            if (fork() == 0) {
-                // Child process
-
-                // Handle input redirection
-                if (!inputFile.empty()) {
-                    int fd = open(inputFile.c_str(), O_RDONLY);
-                    if (fd == -1) {
-                        perror("open input file");
-                        exit(EXIT_FAILURE);
-                    }
-                    if (dup2(fd, STDIN_FILENO) == -1) {
-                        perror("dup2 input");
-                        exit(EXIT_FAILURE);
-                    }
-                    close(fd);
-                }
-
-                // Handle output redirection
-                if (!outputFile.empty()) {
-                    int fd = open(outputFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd == -1) {
-                        perror("open output file");
-                        exit(EXIT_FAILURE);
-                    }
-                    if (dup2(fd, STDOUT_FILENO) == -1) {
-                        perror("dup2 output");
-                        exit(EXIT_FAILURE);
-                    }
-                    close(fd);
-                }
-
-                // Set up pipes
-                if (i != 0) {
-                    if (dup2(pipefds[(i - 1) * 2], STDIN_FILENO) == -1) {
-                        perror("dup2 input pipe");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                if (i != numCommands - 1) {
-                    if (dup2(pipefds[i * 2 + 1], STDOUT_FILENO) == -1) {
-                        perror("dup2 output pipe");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-
-                // Close all pipe file descriptors
-                for (int j = 0; j < 2 * (numCommands - 1); ++j) {
-                    close(pipefds[j]);
-                }
-
-                // Prepare arguments for execvp
-                std::vector<char*> execArgs;
-                for (const auto& arg : args) {
-                    execArgs.push_back(strdup(arg.c_str()));
-                }
-                execArgs.push_back(nullptr);
-
-                execvp(execArgs[0], execArgs.data());
-
-                // If execvp fails
-                perror("execvp");
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        // Parent process closes all pipe file descriptors
-        for (int i = 0; i < 2 * (numCommands - 1); ++i) {
-            close(pipefds[i]);
-        }
-
-        // Wait for all child processes to finish
-        for (int i = 0; i < numCommands; ++i) {
-            wait(nullptr);
-        }
-
-    }
+    return 0;
 }
